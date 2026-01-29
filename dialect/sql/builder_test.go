@@ -2360,3 +2360,301 @@ func TestColumnsHasPrefix(t *testing.T) {
 		require.Equal(t, []any{`\`}, args)
 	})
 }
+
+func TestTableHint(t *testing.T) {
+	t.Run("SingleHint", func(t *testing.T) {
+		query, args := Dialect(dialect.SQLServer).
+			Select("*").
+			From(Table("users").WithHint(TableHintNoLock)).
+			Query()
+		require.Equal(t, "SELECT * FROM [users] WITH (NOLOCK)", query)
+		require.Empty(t, args)
+	})
+
+	t.Run("MultipleHints", func(t *testing.T) {
+		query, args := Dialect(dialect.SQLServer).
+			Select("*").
+			From(Table("users").WithHint(TableHintNoLock, TableHintRowLock)).
+			Query()
+		require.Equal(t, "SELECT * FROM [users] WITH (NOLOCK, ROWLOCK)", query)
+		require.Empty(t, args)
+	})
+
+	t.Run("HintWithAlias", func(t *testing.T) {
+		d := Dialect(dialect.SQLServer)
+		u := d.Table("users").As("u").WithHint(TableHintNoLock)
+		query, args := d.Select(u.C("id"), u.C("name")).
+			From(u).
+			Query()
+		require.Equal(t, "SELECT [u].[id], [u].[name] FROM [users] AS [u] WITH (NOLOCK)", query)
+		require.Empty(t, args)
+	})
+
+	t.Run("HintWithSchema", func(t *testing.T) {
+		query, args := Dialect(dialect.SQLServer).
+			Select("*").
+			From(Table("users").Schema("dbo").WithHint(TableHintReadPast)).
+			Query()
+		require.Equal(t, "SELECT * FROM [dbo].[users] WITH (READPAST)", query)
+		require.Empty(t, args)
+	})
+
+	t.Run("IndexHint", func(t *testing.T) {
+		query, args := Dialect(dialect.SQLServer).
+			Select("*").
+			From(Table("users").WithHint(TableHintIndex("IX_Users_Email"))).
+			Query()
+		require.Equal(t, "SELECT * FROM [users] WITH (INDEX(IX_Users_Email))", query)
+		require.Empty(t, args)
+	})
+
+	t.Run("IndexHintMultiple", func(t *testing.T) {
+		query, args := Dialect(dialect.SQLServer).
+			Select("*").
+			From(Table("users").WithHint(TableHintIndex("IX_Users_Email", "IX_Users_Name"))).
+			Query()
+		require.Equal(t, "SELECT * FROM [users] WITH (INDEX(IX_Users_Email, IX_Users_Name))", query)
+		require.Empty(t, args)
+	})
+
+	t.Run("IndexHintClusteredScan", func(t *testing.T) {
+		query, args := Dialect(dialect.SQLServer).
+			Select("*").
+			From(Table("users").WithHint(TableHintIndex())).
+			Query()
+		require.Equal(t, "SELECT * FROM [users] WITH (INDEX(0))", query)
+		require.Empty(t, args)
+	})
+
+	t.Run("ForceSeekHint", func(t *testing.T) {
+		query, args := Dialect(dialect.SQLServer).
+			Select("*").
+			From(Table("users").WithHint(TableHintForceSeek())).
+			Query()
+		require.Equal(t, "SELECT * FROM [users] WITH (FORCESEEK)", query)
+		require.Empty(t, args)
+	})
+
+	t.Run("ForceSeekWithIndexHint", func(t *testing.T) {
+		query, args := Dialect(dialect.SQLServer).
+			Select("*").
+			From(Table("users").WithHint(TableHintForceSeekWithIndex("IX_Users_Email", "email", "created_at"))).
+			Query()
+		require.Equal(t, "SELECT * FROM [users] WITH (FORCESEEK(IX_Users_Email(email, created_at)))", query)
+		require.Empty(t, args)
+	})
+
+	t.Run("SpatialWindowMaxCellsHint", func(t *testing.T) {
+		query, args := Dialect(dialect.SQLServer).
+			Select("*").
+			From(Table("locations").WithHint(TableHintSpatialWindowMaxCells(256))).
+			Query()
+		require.Equal(t, "SELECT * FROM [locations] WITH (SPATIAL_WINDOW_MAX_CELLS=256)", query)
+		require.Empty(t, args)
+	})
+
+	t.Run("CombinedHints", func(t *testing.T) {
+		query, args := Dialect(dialect.SQLServer).
+			Select("*").
+			From(Table("users").WithHint(TableHintNoLock, TableHintIndex("IX_Users_Email"))).
+			Query()
+		require.Equal(t, "SELECT * FROM [users] WITH (NOLOCK, INDEX(IX_Users_Email))", query)
+		require.Empty(t, args)
+	})
+
+	t.Run("HintWithJoin", func(t *testing.T) {
+		d := Dialect(dialect.SQLServer)
+		users := d.Table("users").As("u").WithHint(TableHintNoLock)
+		orders := d.Table("orders").As("o").WithHint(TableHintReadPast)
+		query, args := d.Select(users.C("id"), orders.C("total")).
+			From(users).
+			Join(orders).On(users.C("id"), orders.C("user_id")).
+			Query()
+		require.Equal(t, "SELECT [u].[id], [o].[total] FROM [users] AS [u] WITH (NOLOCK) JOIN [orders] AS [o] WITH (READPAST) ON [u].[id] = [o].[user_id]", query)
+		require.Empty(t, args)
+	})
+
+	t.Run("HintWithWhere", func(t *testing.T) {
+		query, args := Dialect(dialect.SQLServer).
+			Select("*").
+			From(Table("users").WithHint(TableHintNoLock)).
+			Where(EQ("id", 1)).
+			Query()
+		require.Equal(t, "SELECT * FROM [users] WITH (NOLOCK) WHERE [id] = @p1", query)
+		require.Equal(t, []any{1}, args)
+	})
+
+	t.Run("HintIgnoredOnMySQL", func(t *testing.T) {
+		query, args := Dialect(dialect.MySQL).
+			Select("*").
+			From(Table("users").WithHint(TableHintNoLock)).
+			Query()
+		require.Equal(t, "SELECT * FROM `users`", query)
+		require.Empty(t, args)
+	})
+
+	t.Run("HintIgnoredOnPostgres", func(t *testing.T) {
+		query, args := Dialect(dialect.Postgres).
+			Select("*").
+			From(Table("users").WithHint(TableHintNoLock)).
+			Query()
+		require.Equal(t, `SELECT * FROM "users"`, query)
+		require.Empty(t, args)
+	})
+
+	t.Run("HintIgnoredOnSQLite", func(t *testing.T) {
+		query, args := Dialect(dialect.SQLite).
+			Select("*").
+			From(Table("users").WithHint(TableHintNoLock)).
+			Query()
+		require.Equal(t, "SELECT * FROM `users`", query)
+		require.Empty(t, args)
+	})
+
+	t.Run("AllLockingHints", func(t *testing.T) {
+		hints := []struct {
+			hint TableHint
+			want string
+		}{
+			{TableHintNoLock, "NOLOCK"},
+			{TableHintHoldLock, "HOLDLOCK"},
+			{TableHintUpdLock, "UPDLOCK"},
+			{TableHintXLock, "XLOCK"},
+			{TableHintRowLock, "ROWLOCK"},
+			{TableHintPagLock, "PAGLOCK"},
+			{TableHintTabLock, "TABLOCK"},
+			{TableHintTabLockX, "TABLOCKX"},
+			{TableHintNoWait, "NOWAIT"},
+			{TableHintReadPast, "READPAST"},
+		}
+		for _, tt := range hints {
+			t.Run(tt.want, func(t *testing.T) {
+				query, _ := Dialect(dialect.SQLServer).
+					Select("*").
+					From(Table("t").WithHint(tt.hint)).
+					Query()
+				require.Equal(t, fmt.Sprintf("SELECT * FROM [t] WITH (%s)", tt.want), query)
+			})
+		}
+	})
+
+	t.Run("AllIsolationHints", func(t *testing.T) {
+		hints := []struct {
+			hint TableHint
+			want string
+		}{
+			{TableHintReadCommitted, "READCOMMITTED"},
+			{TableHintReadCommittedLock, "READCOMMITTEDLOCK"},
+			{TableHintReadUncommitted, "READUNCOMMITTED"},
+			{TableHintRepeatableRead, "REPEATABLEREAD"},
+			{TableHintSerializable, "SERIALIZABLE"},
+			{TableHintSnapshot, "SNAPSHOT"},
+		}
+		for _, tt := range hints {
+			t.Run(tt.want, func(t *testing.T) {
+				query, _ := Dialect(dialect.SQLServer).
+					Select("*").
+					From(Table("t").WithHint(tt.hint)).
+					Query()
+				require.Equal(t, fmt.Sprintf("SELECT * FROM [t] WITH (%s)", tt.want), query)
+			})
+		}
+	})
+
+	t.Run("OtherHints", func(t *testing.T) {
+		hints := []struct {
+			hint TableHint
+			want string
+		}{
+			{TableHintNoExpand, "NOEXPAND"},
+			{TableHintForceScan, "FORCESCAN"},
+		}
+		for _, tt := range hints {
+			t.Run(tt.want, func(t *testing.T) {
+				query, _ := Dialect(dialect.SQLServer).
+					Select("*").
+					From(Table("t").WithHint(tt.hint)).
+					Query()
+				require.Equal(t, fmt.Sprintf("SELECT * FROM [t] WITH (%s)", tt.want), query)
+			})
+		}
+	})
+
+	t.Run("HintViaPredicate", func(t *testing.T) {
+		// Demonstrates using a predicate function to add table hints.
+		// This pattern works with generated Ent clients where predicates
+		// are func(*sql.Selector) applied directly to the selector.
+		withNoLock := func(s *Selector) {
+			if t := s.Table(); t != nil {
+				t.WithHint(TableHintNoLock)
+			}
+		}
+
+		s := Dialect(dialect.SQLServer).
+			Select("*").
+			From(Table("users")).
+			Where(EQ("id", 1))
+
+		// Apply the hint via predicate (simulates generated code's predicate application)
+		withNoLock(s)
+
+		query, args := s.Query()
+		require.Equal(t, "SELECT * FROM [users] WITH (NOLOCK) WHERE [id] = @p1", query)
+		require.Equal(t, []any{1}, args)
+	})
+
+	t.Run("HintViaPredicateWithJoin", func(t *testing.T) {
+		// Adding hints to multiple tables via predicate
+		d := Dialect(dialect.SQLServer)
+		users := d.Table("users").As("u")
+		orders := d.Table("orders").As("o")
+
+		s := d.Select(users.C("id"), orders.C("total")).
+			From(users).
+			Join(orders).On(users.C("id"), orders.C("user_id"))
+
+		// Apply hints directly to the table references we already have
+		// (This is the simpler approach when you have the table references)
+		users.WithHint(TableHintNoLock)
+		orders.WithHint(TableHintReadPast)
+
+		query, args := s.Query()
+		require.Equal(t, "SELECT [u].[id], [o].[total] FROM [users] AS [u] WITH (NOLOCK) JOIN [orders] AS [o] WITH (READPAST) ON [u].[id] = [o].[user_id]", query)
+		require.Empty(t, args)
+	})
+
+	t.Run("HintViaPredicateLookup", func(t *testing.T) {
+		// Demonstrates looking up joined tables by name within a predicate
+		// Note: JoinedTable matches by table name, JoinedTableView matches by name or alias
+		d := Dialect(dialect.SQLServer)
+		users := d.Table("users").As("u")
+		orders := d.Table("orders").As("o")
+
+		withHints := func(s *Selector) {
+			// Apply hint to main table (lookup by table name, not alias)
+			if t, ok := s.JoinedTable("users"); !ok {
+				// Main table accessed via Table()
+				if t := s.Table(); t != nil {
+					t.WithHint(TableHintNoLock)
+				}
+			} else {
+				t.WithHint(TableHintNoLock)
+			}
+			// Apply hint to joined table by table name (not alias)
+			if t, ok := s.JoinedTable("orders"); ok {
+				t.WithHint(TableHintReadPast)
+			}
+		}
+
+		s := d.Select(users.C("id"), orders.C("total")).
+			From(users).
+			Join(orders).On(users.C("id"), orders.C("user_id"))
+
+		// Apply the hints via predicate
+		withHints(s)
+
+		query, args := s.Query()
+		require.Equal(t, "SELECT [u].[id], [o].[total] FROM [users] AS [u] WITH (NOLOCK) JOIN [orders] AS [o] WITH (READPAST) ON [u].[id] = [o].[user_id]", query)
+		require.Empty(t, args)
+	})
+}

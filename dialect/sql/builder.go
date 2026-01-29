@@ -1597,6 +1597,78 @@ func (q *queryView) C(column string) string {
 	return column
 }
 
+// TableHint represents a table hint for sqlserver.
+type TableHint string
+
+const (
+	TableHintNoExpand          = "NOEXPAND"
+	TableHintForceScan         = "FORCESCAN"
+	TableHintHoldLock          = "HOLDLOCK"
+	TableHintNoLock            = "NOLOCK"
+	TableHintNoWait            = "NOWAIT"
+	TableHintPagLock           = "PAGLOCK"
+	TableHintReadCommitted     = "READCOMMITTED"
+	TableHintReadCommittedLock = "READCOMMITTEDLOCK"
+	TableHintReadPast          = "READPAST"
+	TableHintReadUncommitted   = "READUNCOMMITTED"
+	TableHintRepeatableRead    = "REPEATABLEREAD"
+	TableHintRowLock           = "ROWLOCK"
+	TableHintSerializable      = "SERIALIZABLE"
+	TableHintSnapshot          = "SNAPSHOT"
+	TableHintTabLock           = "TABLOCK"
+	TableHintTabLockX          = "TABLOCKX"
+	TableHintUpdLock           = "UPDLOCK"
+	TableHintXLock             = "XLOCK"
+)
+
+// TableHintIndex creates an INDEX table hint for the given indexes. If no indexes are given then
+// it creates an INDEX(0) hint, which forces a clustered index scan, if any, or a table scan.
+func TableHintIndex(indexes ...string) TableHint {
+	if len(indexes) == 0 {
+		return TableHint("INDEX(0)")
+	}
+	var hint strings.Builder
+	hint.WriteString("INDEX(")
+	for i, index := range indexes {
+		if i > 0 {
+			hint.WriteString(", ")
+		}
+		hint.WriteString(index)
+	}
+	hint.WriteString(")")
+	return TableHint(hint.String())
+}
+
+// TableHintForceSeek creates a FORCESEEK table hint.
+func TableHintForceSeek() TableHint {
+	return TableHint("FORCESEEK")
+}
+
+// TableHintForceSeekWithIndex creates a FORCESEEK table hint for the given index and columns.
+func TableHintForceSeekWithIndex(index string, columns ...string) TableHint {
+	var hint strings.Builder
+	hint.WriteString("FORCESEEK(")
+	hint.WriteString(index)
+	hint.WriteString("(")
+	for i, col := range columns {
+		if i > 0 {
+			hint.WriteString(", ")
+		}
+		hint.WriteString(col)
+	}
+	hint.WriteString("))")
+	return TableHint(hint.String())
+}
+
+// TableHintSpatialWindowMaxCells creates a SPATIAL_WINDOW_MAX_CELLS table hint.
+func TableHintSpatialWindowMaxCells(cells int) TableHint {
+	return TableHint(fmt.Sprintf("SPATIAL_WINDOW_MAX_CELLS=%d", cells))
+}
+
+func (t TableHint) String() string {
+	return string(t)
+}
+
 // SelectTable is a table selector.
 type SelectTable struct {
 	Builder
@@ -1604,6 +1676,7 @@ type SelectTable struct {
 	name   string
 	schema string
 	quote  bool
+	hints  []TableHint
 }
 
 // Table returns a new table selector.
@@ -1657,6 +1730,12 @@ func (s *SelectTable) Unquote() *SelectTable {
 	return s
 }
 
+// WithHint adds table hints.
+func (s *SelectTable) WithHint(hints ...TableHint) *SelectTable {
+	s.hints = append(s.hints, hints...)
+	return s
+}
+
 // ref returns the table reference.
 func (s *SelectTable) ref() string {
 	if !s.quote {
@@ -1668,6 +1747,16 @@ func (s *SelectTable) ref() string {
 	if s.as != "" {
 		b.WriteString(" AS ")
 		b.Ident(s.as)
+	}
+	if len(s.hints) > 0 && b.sqlserver() {
+		b.WriteString(" WITH (")
+		for i, hint := range s.hints {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(hint.String())
+		}
+		b.WriteByte(')')
 	}
 	return b.String()
 }
