@@ -9,9 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	"entgo.io/ent/dialect/entsql"
+	"entgo.io/ent/dialect/sql/schema"
 	"entgo.io/ent/entc/load"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
@@ -343,6 +345,45 @@ func TestFKColumns(t *testing.T) {
 		require.Equal(r.Table, t2.Edges[i].Rel.Table)
 		require.Equal(r.Columns, t2.Edges[i].Rel.Columns)
 	}
+}
+
+func TestBlobDualWriteGoType(t *testing.T) {
+	require := require.New(t)
+	doc := &load.Schema{
+		Name: "Doc",
+		Fields: []*load.Field{
+			{
+				Name: "config",
+				Info: &field.TypeInfo{
+					Type:    field.TypeBlob,
+					Ident:   "*Config",
+					PkgPath: "example.com/app",
+					PkgName: "app",
+					RType: &field.RType{
+						Name:    "Config",
+						Ident:   "Config",
+						Kind:    reflect.Struct,
+						PkgPath: "example.com/app",
+					},
+				},
+				ValueScanner:  true,
+				BlobDualWrite: true,
+			},
+		},
+	}
+	g, err := NewGraph(&Config{Package: "entc/gen", Storage: drivers[0]}, doc)
+	require.NoError(err)
+	require.Len(g.Nodes, 1)
+	f := g.Nodes[0].Fields[0]
+	require.True(f.IsBlob())
+	require.False(f.IsBlobNoColumn())
+	// After graph initialization, the blob field should be TypeBytes but preserve GoType info.
+	require.Equal(field.TypeBytes, f.Type.Type)
+	require.True(f.HasGoType(), "GoType should be preserved for DualWrite blob fields")
+	require.Equal("*Config", f.Type.String(), "Type.String() should return the custom GoType")
+	require.Equal("example.com/app", f.Type.PkgPath)
+	require.NotNil(f.Type.RType)
+	require.Equal("Config", f.Type.RType.Name)
 }
 
 func TestAbortDuplicateFK(t *testing.T) {
@@ -692,4 +733,38 @@ func TestDependencyAnnotation_Build(t *testing.T) {
 		require.NoError(t, d.Build())
 		require.Equal(t, tt.field, d.Field)
 	}
+}
+
+func TestEdgeFieldCollation(t *testing.T) {
+	var (
+		user = &load.Schema{
+			Name: "User",
+			Fields: []*load.Field{
+				{Name: "id", Info: &field.TypeInfo{Type: field.TypeString}, Annotations: dict("EntSQL", dict("collation", "utf8mb4_bin"))},
+			},
+		}
+		post = &load.Schema{
+			Name: "Post",
+			Fields: []*load.Field{
+				{Name: "author_id", Info: &field.TypeInfo{Type: field.TypeString}, Annotations: dict("EntSQL", dict("collation", "utf8mb4_bin"))},
+			},
+			Edges: []*load.Edge{
+				{Name: "author", Type: "User", Field: "author_id", Unique: true, Required: true},
+			},
+		}
+	)
+	g, err := NewGraph(&Config{Package: "entc/gen", Storage: drivers[0]}, user, post)
+	require.NoError(t, err)
+	tables, err := g.Tables()
+	require.NoError(t, err)
+
+	// Find the post table
+	idx := slices.IndexFunc(tables, func(t *schema.Table) bool { return t.Name == "posts" })
+	require.NotEqual(t, -1, idx, "posts table should exist")
+	postTable := tables[idx]
+
+	// Verify author_id column preserves collation from field annotation
+	col, ok := postTable.Column("author_id")
+	require.True(t, ok)
+	require.Equal(t, "utf8mb4_bin", col.Collation)
 }

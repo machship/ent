@@ -173,7 +173,7 @@ func (a *Atlas) NamedDiff(ctx context.Context, name string, tables ...*Table) er
 	case ModeReplay:
 		plan, err = a.planReplay(ctx, name, tables)
 	default:
-		return fmt.Errorf("unknown migration mode: %q", a.mode)
+		return fmt.Errorf("unknown migration mode: %d", a.mode)
 	}
 	switch {
 	case err != nil:
@@ -1078,6 +1078,7 @@ func (a *Atlas) aIndexes(et *Table, at *schema.Table) error {
 // are linked to their indexes, and PKs columns are defined.
 func (a *Atlas) setupTables(tables []*Table) {
 	for _, t := range tables {
+		t.mu.Lock()
 		if t.columns == nil {
 			t.columns = make(map[string]*Column, len(t.Columns))
 		}
@@ -1101,6 +1102,7 @@ func (a *Atlas) setupTables(tables []*Table) {
 				fk.Columns[i].foreign = fk
 			}
 		}
+		t.mu.Unlock()
 	}
 }
 

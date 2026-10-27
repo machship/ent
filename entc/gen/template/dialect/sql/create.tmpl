@@ -10,6 +10,7 @@ in the LICENSE file in the root directory of this source tree.
 {{ $builder := pascal $.Scope.Builder }}
 {{ $receiver := $.Scope.Receiver }}
 {{ $mutation := print $receiver ".mutation"  }}
+{{ $pkg := base $.Config.Package }}
 
 func ({{ $receiver }} *{{ $builder }}) sqlSave(ctx context.Context) (*{{ $.Name }}, error) {
 	if err := {{ $receiver }}.check(); err != nil {
@@ -21,31 +22,141 @@ func ({{ $receiver }} *{{ $builder }}) sqlSave(ctx context.Context) (*{{ $.Name 
 			return nil, err
 		}
 	{{- end }}
+	{{- if $.HasBlobFields }}
+	_blobs := ent.NewBlobs({{ $mutation }}.blobOpeners.{{ $.Name }})
+	{{- range $f := $.BlobFields }}
+		{{- if not $f.IsBlobLazy }}
+		if value, ok := {{ $mutation }}.{{ $f.MutationGet }}(); ok {
+			{{- if $f.HasValueScanner }}
+			_blobDV, err := {{ $f.ValueFunc }}(value)
+			if err != nil {
+				return nil, fmt.Errorf("{{ $pkg }}: encoding {{ $f.Name }}: %w", err)
+			}
+			var _blobData []byte
+			switch v := _blobDV.(type) {
+			case []byte:
+				_blobData = v
+			case string:
+				_blobData = []byte(v)
+			default:
+				return nil, fmt.Errorf("{{ $pkg }}: encoding {{ $f.Name }}: expected []byte or string, got %T", _blobDV)
+			}
+			_blobs.Set({{ $.Package }}.{{ $f.Constant }}, _blobData,
+				{{ if $f.HasBlobKey }}{{ $.Package }}.{{ $f.BlobKeyName }}{{ else }}defaultBlobKey{{ end }},
+				func(k string) {
+					_node.{{ $f.BlobKeyColumn }} = &k
+					_spec.SetField("{{ $f.BlobKeyColumn }}", field.TypeString, k)
+				},
+			)
+			{{- else if $f.IsBlobGoString }}
+			_blobs.Set({{ $.Package }}.{{ $f.Constant }}, []byte(value),
+				{{ if $f.HasBlobKey }}{{ $.Package }}.{{ $f.BlobKeyName }}{{ else }}defaultBlobKey{{ end }},
+				func(k string) {
+					_node.{{ $f.BlobKeyColumn }} = &k
+					_spec.SetField("{{ $f.BlobKeyColumn }}", field.TypeString, k)
+				},
+			)
+			{{- else }}
+			_blobs.Set({{ $.Package }}.{{ $f.Constant }}, value,
+				{{ if $f.HasBlobKey }}{{ $.Package }}.{{ $f.BlobKeyName }}{{ else }}defaultBlobKey{{ end }},
+				func(k string) {
+					_node.{{ $f.BlobKeyColumn }} = &k
+					_spec.SetField("{{ $f.BlobKeyColumn }}", field.TypeString, k)
+				},
+			)
+			{{- end }}
+			_node.{{ $f.StructField }} = value
+		}
+		{{- else }}
+		if r, ok := {{ $mutation }}.{{ $f.StructField }}(); ok {
+			_blobData, err := io.ReadAll(r)
+			if err != nil {
+				return nil, fmt.Errorf("{{ $pkg }}: reading {{ $f.Name }}: %w", err)
+			}
+			_blobs.Set({{ $.Package }}.{{ $f.Constant }}, _blobData,
+				{{ if $f.HasBlobKey }}{{ $.Package }}.{{ $f.BlobKeyName }}{{ else }}defaultBlobKey{{ end }},
+				func(k string) {
+					_node.{{ $f.BlobKeyColumn }} = &k
+					_spec.SetField("{{ $f.BlobKeyColumn }}", field.TypeString, k)
+				},
+			)
+		}
+		{{- end }}
+	{{- end }}
+	_blobCleanup, err := _blobs.Create(ctx, {{ if $.HasBlobRefCheckedFields }}&sqlgraph.BlobSpec{
+			Driver: {{ $receiver }}.driver,
+			Table:  {{ $.Package }}.Table,
+			Columns: map[string]string{
+				{{- range $f := $.BlobRefCheckedFields }}
+				{{ $.Package }}.{{ $f.Constant }}: "{{ $f.BlobKeyColumn }}",
+				{{- end }}
+			},
+			CheckRefs: map[string]bool{
+				{{- range $f := $.BlobRefCheckedFields }}
+				{{ $.Package }}.{{ $f.Constant }}: true,
+				{{- end }}
+			},
+		}{{ else }}nil{{ end }})
+	if err != nil {
+		return nil, err
+	}
+	{{- end }}
 	if err := sqlgraph.CreateNode(ctx, {{ $receiver }}.driver, _spec); err != nil {
 		if sqlgraph.IsConstraintError(err) {
 			err = &ConstraintError{msg: err.Error(), wrap: err}
 		}
+		{{- if $.HasBlobFields }}
+		return nil, errors.Join(err, _blobCleanup(ctx))
+		{{- else }}
 		return nil, err
+		{{- end }}
 	}
+	{{- if $.HasBlobFields }}
+	if txd, ok := {{ $receiver }}.driver.(*txDriver); ok {
+		txd.mu.Lock()
+		txd.onRollback = append(txd.onRollback, func(next Rollbacker) Rollbacker {
+			return RollbackFunc(func(ctx context.Context, tx *Tx) error {
+				err := next.Rollback(ctx, tx)
+				return errors.Join(err, _blobCleanup(ctx))
+			})
+		})
+		txd.mu.Unlock()
+	}
+	{{- end }}
 	{{- if $.HasCompositeID }}
-	{{- else if or $.ID.Type.ValueScanner (not $.ID.Type.Numeric) }}
+	{{- else if or $.ID.HasValueScanner $.ID.Type.ValueScanner (not $.ID.Type.Numeric) }}
 		if _spec.ID.Value != nil {
-			{{- /* If the ID type is not a pointer, but implements the ValueScanner interface (e.g. UUID fields). */}}
-			{{- if and $.ID.Type.ValueScanner (not $.ID.Type.RType.IsPtr) }}
-				if id, ok := _spec.ID.Value.(*{{ $.ID.Type }}); ok {
-					_node.ID = *id
-			{{- else }}
-				if id, ok := _spec.ID.Value.({{ $.ID.Type }}); ok {
-					_node.ID = id
-			{{- end }}
-			{{- if $.ID.Type.ValueScanner }}
-				} else if err := _node.ID.Scan(_spec.ID.Value); err != nil {
-					return nil, err
-			{{- else  }}
-				} else {
-					return nil, fmt.Errorf("unexpected {{ $.Name }}.ID type: %T", _spec.ID.Value)
-			{{- end }}
+			{{- if $.ID.HasValueScanner }}
+				sv, ok := _spec.ID.Value.(field.ValueScanner)
+				if !ok {
+					sv = {{ $.ID.ScanValueFunc }}()
+					if err := sv.Scan(_spec.ID.Value); err != nil {
+						return nil, err
+					}
 				}
+				if value, err := {{ $.ID.FromValueFunc }}(sv); err != nil {
+					return nil, err
+				} else {
+					_node.ID = value
+				}
+			{{- else }}
+				{{- /* If the ID type is not a pointer, but implements the ValueScanner interface (e.g. UUID fields). */}}
+				{{- if and $.ID.Type.ValueScanner (not $.ID.Type.RType.IsPtr) }}
+					if id, ok := _spec.ID.Value.(*{{ $.ID.Type }}); ok {
+						_node.ID = *id
+				{{- else }}
+					if id, ok := _spec.ID.Value.({{ $.ID.Type }}); ok {
+						_node.ID = id
+				{{- end }}
+				{{- if $.ID.Type.ValueScanner }}
+					} else if err := _node.ID.Scan(_spec.ID.Value); err != nil {
+						return nil, err
+				{{- else  }}
+					} else {
+						return nil, fmt.Errorf("unexpected {{ $.Name }}.ID type: %T", _spec.ID.Value)
+				{{- end }}
+				}
+			{{- end }}
 		}
 	{{- else }}
 		{{- if $.ID.UserDefined }}
@@ -78,10 +189,19 @@ func ({{ $receiver }} *{{ $builder }}) createSpec() (*{{ $.Name }}, *sqlgraph.Cr
 	{{- if and (not $.HasCompositeID) $.ID.UserDefined }}
 		if id, ok := {{ $mutation }}.{{ $.ID.MutationGet }}(); ok {
 			_node.ID = id
-			_spec.ID.Value = {{ if and $.ID.Type.ValueScanner (not $.ID.Type.RType.IsPtr) }}&{{ end }}id
+			{{- if $.ID.HasValueScanner }}
+				vv, err := {{ $.ID.ValueFunc }}(id)
+				if err != nil {
+					return nil, nil, err
+				}
+				_spec.ID.Value = vv
+			{{- else }}
+				_spec.ID.Value = {{ if and $.ID.Type.ValueScanner (not $.ID.Type.RType.IsPtr) }}&{{ end }}id
+			{{- end }}
 		}
 	{{- end }}
 	{{- range $f := $.MutationFields }}
+		{{- if $f.IsBlobNoColumn }}{{ continue }}{{ end }}
 		if value, ok := {{ $mutation }}.{{ $f.MutationGet }}(); ok {
 			{{- if $f.HasValueScanner }}
 				vv, err := {{ $f.ValueFunc }}(value)
@@ -140,6 +260,7 @@ func ({{ $receiver }} *{{ $builder }}) createSpec() (*{{ $.Name }}, *sqlgraph.Cr
 {{ define "dialect/sql/create_bulk" }}
 {{ $builder := pascal $.Scope.Builder }}
 {{ $receiver := $.Scope.Receiver }}
+{{ $pkg := base $.Config.Package }}
 
 // Save creates the {{ $.Name }} entities in the database.
 func ({{ $receiver }} *{{ $builder }}) Save(ctx context.Context) ([]*{{ $.Name }}, error) {
@@ -150,6 +271,9 @@ func ({{ $receiver }} *{{ $builder }}) Save(ctx context.Context) ([]*{{ $.Name }
 	specs := make([]*sqlgraph.CreateSpec, len({{ $receiver }}.builders))
 	nodes := make([]*{{ $.Name }}, len({{ $receiver }}.builders))
 	mutators := make([]Mutator, len({{ $receiver }}.builders))
+	{{- if $.HasBlobFields }}
+		_blobs := ent.NewBlobs({{ $receiver }}.blobOpeners.{{ $.Name }})
+	{{- end }}
 	for i := range {{ $receiver }}.builders {
 		func(i int, root context.Context) {
 			builder := {{ $receiver }}.builders[i]
@@ -172,9 +296,90 @@ func ({{ $receiver }} *{{ $builder }}) Save(ctx context.Context) ([]*{{ $.Name }
 						return nil, err
 					}
 				{{- end }}
+				{{- if $.HasBlobFields }}
+				{{- range $f := $.BlobFields }}
+					{{- if not $f.IsBlobLazy }}
+					if value, ok := mutation.{{ $f.MutationGet }}(); ok {
+						{{- if $f.HasValueScanner }}
+						_blobDV, err := {{ $f.ValueFunc }}(value)
+						if err != nil {
+							return nil, fmt.Errorf("{{ $pkg }}: encoding {{ $f.Name }}: %w", err)
+						}
+						var _blobData []byte
+						switch v := _blobDV.(type) {
+						case []byte:
+							_blobData = v
+						case string:
+							_blobData = []byte(v)
+						default:
+							return nil, fmt.Errorf("{{ $pkg }}: encoding {{ $f.Name }}: expected []byte or string, got %T", _blobDV)
+						}
+						_blobs.Set({{ $.Package }}.{{ $f.Constant }}, _blobData,
+							{{ if $f.HasBlobKey }}{{ $.Package }}.{{ $f.BlobKeyName }}{{ else }}defaultBlobKey{{ end }},
+							func(k string) {
+								nodes[i].{{ $f.BlobKeyColumn }} = &k
+								specs[i].SetField("{{ $f.BlobKeyColumn }}", field.TypeString, k)
+							},
+						)
+						{{- else if $f.IsBlobGoString }}
+						_blobs.Set({{ $.Package }}.{{ $f.Constant }}, []byte(value),
+							{{ if $f.HasBlobKey }}{{ $.Package }}.{{ $f.BlobKeyName }}{{ else }}defaultBlobKey{{ end }},
+							func(k string) {
+								nodes[i].{{ $f.BlobKeyColumn }} = &k
+								specs[i].SetField("{{ $f.BlobKeyColumn }}", field.TypeString, k)
+							},
+						)
+						{{- else }}
+						_blobs.Set({{ $.Package }}.{{ $f.Constant }}, value,
+							{{ if $f.HasBlobKey }}{{ $.Package }}.{{ $f.BlobKeyName }}{{ else }}defaultBlobKey{{ end }},
+							func(k string) {
+								nodes[i].{{ $f.BlobKeyColumn }} = &k
+								specs[i].SetField("{{ $f.BlobKeyColumn }}", field.TypeString, k)
+							},
+						)
+						{{- end }}
+						nodes[i].{{ $f.StructField }} = value
+					}
+					{{- else }}
+					if r, ok := mutation.{{ $f.StructField }}(); ok {
+						_blobData, err := io.ReadAll(r)
+						if err != nil {
+							return nil, fmt.Errorf("{{ $pkg }}: reading {{ $f.Name }}: %w", err)
+						}
+						_blobs.Set({{ $.Package }}.{{ $f.Constant }}, _blobData,
+							{{ if $f.HasBlobKey }}{{ $.Package }}.{{ $f.BlobKeyName }}{{ else }}defaultBlobKey{{ end }},
+							func(k string) {
+								nodes[i].{{ $f.BlobKeyColumn }} = &k
+								specs[i].SetField("{{ $f.BlobKeyColumn }}", field.TypeString, k)
+							},
+						)
+					}
+					{{- end }}
+				{{- end }}
+				{{- end }}
 				if i < len(mutators)-1 {
 					_, err = mutators[i+1].Mutate(root, {{ $receiver }}.builders[i+1].mutation)
 				} else {
+					{{- if $.HasBlobFields }}
+					// Write blobs before creating SQL rows so insert failures can clean up written objects.
+					_blobCleanup, err := _blobs.Create(ctx, {{ if $.HasBlobRefCheckedFields }}&sqlgraph.BlobSpec{
+							Driver: {{ $receiver }}.driver,
+							Table:  {{ $.Package }}.Table,
+							Columns: map[string]string{
+								{{- range $f := $.BlobRefCheckedFields }}
+								{{ $.Package }}.{{ $f.Constant }}: "{{ $f.BlobKeyColumn }}",
+								{{- end }}
+							},
+							CheckRefs: map[string]bool{
+								{{- range $f := $.BlobRefCheckedFields }}
+								{{ $.Package }}.{{ $f.Constant }}: true,
+								{{- end }}
+							},
+						}{{ else }}nil{{ end }})
+					if err != nil {
+						return nil, err
+					}
+					{{- end }}
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
 					{{- /* Allow mutating the sqlgraph.BatchCreateSpec by ent extensions or user templates.*/}}
 					{{- with $tmpls := matchTemplate "dialect/sql/create_bulk/spec/*" }}
@@ -187,15 +392,45 @@ func ({{ $receiver }} *{{ $builder }}) Save(ctx context.Context) ([]*{{ $.Name }
 						if sqlgraph.IsConstraintError(err) {
 							err = &ConstraintError{msg: err.Error(), wrap: err}
 						}
+						{{- if $.HasBlobFields }}
+						return nil, errors.Join(err, _blobCleanup(ctx))
+						{{- end }}
 					}
+					{{- if $.HasBlobFields }}
+					if txd, ok := {{ $receiver }}.driver.(*txDriver); ok {
+						txd.mu.Lock()
+						txd.onRollback = append(txd.onRollback, func(next Rollbacker) Rollbacker {
+							return RollbackFunc(func(ctx context.Context, tx *Tx) error {
+								err := next.Rollback(ctx, tx)
+								return errors.Join(err, _blobCleanup(ctx))
+							})
+						})
+						txd.mu.Unlock()
+					}
+					{{- end }}
 				}
 				if err != nil {
 					return nil, err
 				}
 				{{- if $.HasOneFieldID }}
 					mutation.{{ $.ID.BuilderField }} = &nodes[i].{{ $.ID.StructField }}
-					{{- if or $.ID.IsString $.ID.IsUUID $.ID.IsBytes $.ID.IsOther }}
+					{{- if and (or $.ID.IsString $.ID.IsUUID $.ID.IsBytes $.ID.IsOther) (not $.ID.HasValueScanner) }}
 						{{- /* Do nothing, because these 4 types must be supplied by the user. */ -}}
+					{{- else if $.ID.HasValueScanner }}
+						if specs[i].ID.Value != nil {
+							sv, ok := specs[i].ID.Value.(field.ValueScanner)
+							if !ok {
+								sv = {{ $.ID.ScanValueFunc }}()
+								if err := sv.Scan(specs[i].ID.Value); err != nil {
+									return nil, err
+								}
+							}
+							if id, err := {{ $.ID.FromValueFunc }}(sv); err != nil {
+								return nil, err
+							} else {
+								nodes[i].ID = id
+							}
+						}
 					{{- else if or $.ID.Type.ValueScanner }}
 						if specs[i].ID.Value != nil {
 							if err := nodes[i].ID.Scan(specs[i].ID.Value); err != nil {
