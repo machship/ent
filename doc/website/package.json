@@ -24,6 +24,7 @@
     "react-dom": "^17.0.1",
     "react-github-btn": "^1.2.0"
   },
+  "//resolutions": "webpack is pinned to 5.104.1 on purpose: webpack >=5.105 rejects the webpackbar ProgressPlugin options and >=5.111.1 moves lib/ContextReplacementPlugin, both of which break `docusaurus build` with Docusaurus 2.4.3. Lift the pin only together with a Docusaurus upgrade.",
   "resolutions": {
     "glob-parent": "^5.1.2",
     "trim": "^0.0.3",
