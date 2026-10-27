@@ -63,6 +63,11 @@ type Field struct {
 	Comment          string                  `json:"comment,omitempty"`
 	Deprecated       bool                    `json:"deprecated,omitempty"`
 	DeprecatedReason string                  `json:"deprecated_reason,omitempty"`
+	BlobKey          bool                    `json:"blob_key,omitempty"`
+	BlobDualWrite    bool                    `json:"blob_dual_write,omitempty"`
+	BlobDWSchemaType map[string]string       `json:"blob_dw_schema_type,omitempty"`
+	BlobLazy         bool                    `json:"blob_lazy,omitempty"`
+	BlobCheckRefs    bool                    `json:"blob_check_refs,omitempty"`
 }
 
 // Edge represents an ent.Edge that was loaded from a complied user package.
@@ -144,6 +149,11 @@ func NewField(fd *field.Descriptor) (*Field, error) {
 		Comment:          fd.Comment,
 		Deprecated:       fd.Deprecated,
 		DeprecatedReason: fd.DeprecatedReason,
+		BlobKey:          fd.BlobKey != nil,
+		BlobDualWrite:    fd.BlobDualWrite,
+		BlobLazy:         fd.BlobLazy,
+		BlobCheckRefs:    fd.BlobCheckRefs,
+		BlobDWSchemaType: fd.BlobDWSchemaType,
 	}
 	for _, at := range fd.Annotations {
 		sf.addAnnotation(at)

@@ -8,6 +8,8 @@ package ent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -23,6 +25,7 @@ import (
 	"entgo.io/ent/entc/integration/ent/builder"
 	"entgo.io/ent/entc/integration/ent/card"
 	"entgo.io/ent/entc/integration/ent/comment"
+	"entgo.io/ent/entc/integration/ent/document"
 	"entgo.io/ent/entc/integration/ent/exvaluescan"
 	"entgo.io/ent/entc/integration/ent/fieldtype"
 	"entgo.io/ent/entc/integration/ent/file"
@@ -55,6 +58,8 @@ type Client struct {
 	Card *CardClient
 	// Comment is the client for interacting with the Comment builders.
 	Comment *CommentClient
+	// Document is the client for interacting with the Document builders.
+	Document *DocumentClient
 	// ExValueScan is the client for interacting with the ExValueScan builders.
 	ExValueScan *ExValueScanClient
 	// FieldType is the client for interacting with the FieldType builders.
@@ -101,6 +106,7 @@ func (c *Client) init() {
 	c.Builder = NewBuilderClient(c.config)
 	c.Card = NewCardClient(c.config)
 	c.Comment = NewCommentClient(c.config)
+	c.Document = NewDocumentClient(c.config)
 	c.ExValueScan = NewExValueScanClient(c.config)
 	c.FieldType = NewFieldTypeClient(c.config)
 	c.File = NewFileClient(c.config)
@@ -131,6 +137,8 @@ type (
 		hooks *hooks
 		// interceptors to execute on queries.
 		inters *inters
+		// blobOpeners configures how blob buckets are opened for each entity type.
+		blobOpeners BlobOpeners
 	}
 	// Option function to configure the client.
 	Option func(*config)
@@ -174,6 +182,27 @@ func Driver(driver dialect.Driver) Option {
 	}
 }
 
+// Blob is an alias for the [ent.Blob] interface defined in the entgo.io/ent package.
+type Blob = ent.Blob
+
+// BlobOpeners configures how blob buckets are opened for each entity type.
+// Each field is a function that opens a blob bucket for the given field name.
+type BlobOpeners struct {
+	Document ent.BlobOpener
+}
+
+// WithBlobOpeners configures the blob bucket openers.
+func WithBlobOpeners(openers BlobOpeners) Option {
+	return func(c *config) {
+		c.blobOpeners = openers
+	}
+}
+
+func defaultBlobKey(_ context.Context, data []byte) (string, error) {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:]), nil
+}
+
 // Open opens a database/sql.DB specified by the driver name and
 // the data source name, and returns a new client attached to it.
 // Optional parameters can be added for configuring the client.
@@ -212,6 +241,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		Builder:     NewBuilderClient(cfg),
 		Card:        NewCardClient(cfg),
 		Comment:     NewCommentClient(cfg),
+		Document:    NewDocumentClient(cfg),
 		ExValueScan: NewExValueScanClient(cfg),
 		FieldType:   NewFieldTypeClient(cfg),
 		File:        NewFileClient(cfg),
@@ -250,6 +280,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		Builder:     NewBuilderClient(cfg),
 		Card:        NewCardClient(cfg),
 		Comment:     NewCommentClient(cfg),
+		Document:    NewDocumentClient(cfg),
 		ExValueScan: NewExValueScanClient(cfg),
 		FieldType:   NewFieldTypeClient(cfg),
 		File:        NewFileClient(cfg),
@@ -294,9 +325,9 @@ func (c *Client) Close() error {
 // In order to add hooks to a specific client, call: `client.Node.Use(...)`.
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
-		c.Api, c.Builder, c.Card, c.Comment, c.ExValueScan, c.FieldType, c.File,
-		c.FileType, c.Goods, c.Group, c.GroupInfo, c.Item, c.License, c.Node, c.PC,
-		c.Pet, c.Spec, c.Task, c.User,
+		c.Api, c.Builder, c.Card, c.Comment, c.Document, c.ExValueScan, c.FieldType,
+		c.File, c.FileType, c.Goods, c.Group, c.GroupInfo, c.Item, c.License, c.Node,
+		c.PC, c.Pet, c.Spec, c.Task, c.User,
 	} {
 		n.Use(hooks...)
 	}
@@ -306,9 +337,9 @@ func (c *Client) Use(hooks ...Hook) {
 // In order to add interceptors to a specific client, call: `client.Node.Intercept(...)`.
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
-		c.Api, c.Builder, c.Card, c.Comment, c.ExValueScan, c.FieldType, c.File,
-		c.FileType, c.Goods, c.Group, c.GroupInfo, c.Item, c.License, c.Node, c.PC,
-		c.Pet, c.Spec, c.Task, c.User,
+		c.Api, c.Builder, c.Card, c.Comment, c.Document, c.ExValueScan, c.FieldType,
+		c.File, c.FileType, c.Goods, c.Group, c.GroupInfo, c.Item, c.License, c.Node,
+		c.PC, c.Pet, c.Spec, c.Task, c.User,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -335,6 +366,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.Card.mutate(ctx, m)
 	case *CommentMutation:
 		return c.Comment.mutate(ctx, m)
+	case *DocumentMutation:
+		return c.Document.mutate(ctx, m)
 	case *ExValueScanMutation:
 		return c.ExValueScan.mutate(ctx, m)
 	case *FieldTypeMutation:
@@ -451,7 +484,7 @@ func (c *APIClient) DeleteOne(_m *Api) *APIDeleteOne {
 func (c *APIClient) DeleteOneID(id int) *APIDeleteOne {
 	builder := c.Delete().Where(api.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &APIDeleteOne{builder}
 }
 
@@ -584,7 +617,7 @@ func (c *BuilderClient) DeleteOne(_m *Builder) *BuilderDeleteOne {
 func (c *BuilderClient) DeleteOneID(id int) *BuilderDeleteOne {
 	builderC := c.Delete().Where(builder.ID(id))
 	builderC.mutation.id = &id
-	builderC.mutation.op = OpDeleteOne
+	builderC.mutation.SetOp(OpDeleteOne)
 	return &BuilderDeleteOne{builderC}
 }
 
@@ -717,7 +750,7 @@ func (c *CardClient) DeleteOne(_m *Card) *CardDeleteOne {
 func (c *CardClient) DeleteOneID(id int) *CardDeleteOne {
 	builder := c.Delete().Where(card.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &CardDeleteOne{builder}
 }
 
@@ -882,7 +915,7 @@ func (c *CommentClient) DeleteOne(_m *Comment) *CommentDeleteOne {
 func (c *CommentClient) DeleteOneID(id int) *CommentDeleteOne {
 	builder := c.Delete().Where(comment.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &CommentDeleteOne{builder}
 }
 
@@ -931,6 +964,139 @@ func (c *CommentClient) mutate(ctx context.Context, m *CommentMutation) (Value, 
 		return (&CommentDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown Comment mutation op: %q", m.Op())
+	}
+}
+
+// DocumentClient is a client for the Document schema.
+type DocumentClient struct {
+	config
+}
+
+// NewDocumentClient returns a client for the Document from the given config.
+func NewDocumentClient(c config) *DocumentClient {
+	return &DocumentClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `document.Hooks(f(g(h())))`.
+func (c *DocumentClient) Use(hooks ...Hook) {
+	c.hooks.Document = append(c.hooks.Document, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `document.Intercept(f(g(h())))`.
+func (c *DocumentClient) Intercept(interceptors ...Interceptor) {
+	c.inters.Document = append(c.inters.Document, interceptors...)
+}
+
+// Create returns a builder for creating a Document entity.
+func (c *DocumentClient) Create() *DocumentCreate {
+	mutation := newDocumentMutation(c.config, OpCreate)
+	return &DocumentCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of Document entities.
+func (c *DocumentClient) CreateBulk(builders ...*DocumentCreate) *DocumentCreateBulk {
+	return &DocumentCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *DocumentClient) MapCreateBulk(slice any, setFunc func(*DocumentCreate, int)) *DocumentCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &DocumentCreateBulk{err: fmt.Errorf("calling to DocumentClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*DocumentCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &DocumentCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for Document.
+func (c *DocumentClient) Update() *DocumentUpdate {
+	mutation := newDocumentMutation(c.config, OpUpdate)
+	return &DocumentUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *DocumentClient) UpdateOne(_m *Document) *DocumentUpdateOne {
+	mutation := newDocumentMutation(c.config, OpUpdateOne, withDocument(_m))
+	return &DocumentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *DocumentClient) UpdateOneID(id int) *DocumentUpdateOne {
+	mutation := newDocumentMutation(c.config, OpUpdateOne, withDocumentID(id))
+	return &DocumentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for Document.
+func (c *DocumentClient) Delete() *DocumentDelete {
+	mutation := newDocumentMutation(c.config, OpDelete)
+	return &DocumentDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *DocumentClient) DeleteOne(_m *Document) *DocumentDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *DocumentClient) DeleteOneID(id int) *DocumentDeleteOne {
+	builder := c.Delete().Where(document.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.SetOp(OpDeleteOne)
+	return &DocumentDeleteOne{builder}
+}
+
+// Query returns a query builder for Document.
+func (c *DocumentClient) Query() *DocumentQuery {
+	return &DocumentQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeDocument},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a Document entity by its id.
+func (c *DocumentClient) Get(ctx context.Context, id int) (*Document, error) {
+	return c.Query().Where(document.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *DocumentClient) GetX(ctx context.Context, id int) *Document {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *DocumentClient) Hooks() []Hook {
+	return c.hooks.Document
+}
+
+// Interceptors returns the client interceptors.
+func (c *DocumentClient) Interceptors() []Interceptor {
+	return c.inters.Document
+}
+
+func (c *DocumentClient) mutate(ctx context.Context, m *DocumentMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&DocumentCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&DocumentUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&DocumentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&DocumentDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown Document mutation op: %q", m.Op())
 	}
 }
 
@@ -1015,7 +1181,7 @@ func (c *ExValueScanClient) DeleteOne(_m *ExValueScan) *ExValueScanDeleteOne {
 func (c *ExValueScanClient) DeleteOneID(id int) *ExValueScanDeleteOne {
 	builder := c.Delete().Where(exvaluescan.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &ExValueScanDeleteOne{builder}
 }
 
@@ -1148,7 +1314,7 @@ func (c *FieldTypeClient) DeleteOne(_m *FieldType) *FieldTypeDeleteOne {
 func (c *FieldTypeClient) DeleteOneID(id int) *FieldTypeDeleteOne {
 	builder := c.Delete().Where(fieldtype.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &FieldTypeDeleteOne{builder}
 }
 
@@ -1281,7 +1447,7 @@ func (c *FileClient) DeleteOne(_m *File) *FileDeleteOne {
 func (c *FileClient) DeleteOneID(id int) *FileDeleteOne {
 	builder := c.Delete().Where(file.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &FileDeleteOne{builder}
 }
 
@@ -1462,7 +1628,7 @@ func (c *FileTypeClient) DeleteOne(_m *FileType) *FileTypeDeleteOne {
 func (c *FileTypeClient) DeleteOneID(id int) *FileTypeDeleteOne {
 	builder := c.Delete().Where(filetype.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &FileTypeDeleteOne{builder}
 }
 
@@ -1611,7 +1777,7 @@ func (c *GoodsClient) DeleteOne(_m *Goods) *GoodsDeleteOne {
 func (c *GoodsClient) DeleteOneID(id int) *GoodsDeleteOne {
 	builder := c.Delete().Where(goods.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &GoodsDeleteOne{builder}
 }
 
@@ -1744,7 +1910,7 @@ func (c *GroupClient) DeleteOne(_m *Group) *GroupDeleteOne {
 func (c *GroupClient) DeleteOneID(id int) *GroupDeleteOne {
 	builder := c.Delete().Where(group.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &GroupDeleteOne{builder}
 }
 
@@ -1941,7 +2107,7 @@ func (c *GroupInfoClient) DeleteOne(_m *GroupInfo) *GroupInfoDeleteOne {
 func (c *GroupInfoClient) DeleteOneID(id int) *GroupInfoDeleteOne {
 	builder := c.Delete().Where(groupinfo.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &GroupInfoDeleteOne{builder}
 }
 
@@ -2090,7 +2256,7 @@ func (c *ItemClient) DeleteOne(_m *Item) *ItemDeleteOne {
 func (c *ItemClient) DeleteOneID(id string) *ItemDeleteOne {
 	builder := c.Delete().Where(item.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &ItemDeleteOne{builder}
 }
 
@@ -2223,7 +2389,7 @@ func (c *LicenseClient) DeleteOne(_m *License) *LicenseDeleteOne {
 func (c *LicenseClient) DeleteOneID(id int) *LicenseDeleteOne {
 	builder := c.Delete().Where(license.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &LicenseDeleteOne{builder}
 }
 
@@ -2356,7 +2522,7 @@ func (c *NodeClient) DeleteOne(_m *Node) *NodeDeleteOne {
 func (c *NodeClient) DeleteOneID(id int) *NodeDeleteOne {
 	builder := c.Delete().Where(node.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &NodeDeleteOne{builder}
 }
 
@@ -2521,7 +2687,7 @@ func (c *PCClient) DeleteOne(_m *PC) *PCDeleteOne {
 func (c *PCClient) DeleteOneID(id int) *PCDeleteOne {
 	builder := c.Delete().Where(pc.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &PCDeleteOne{builder}
 }
 
@@ -2654,7 +2820,7 @@ func (c *PetClient) DeleteOne(_m *Pet) *PetDeleteOne {
 func (c *PetClient) DeleteOneID(id int) *PetDeleteOne {
 	builder := c.Delete().Where(pet.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &PetDeleteOne{builder}
 }
 
@@ -2819,7 +2985,7 @@ func (c *SpecClient) DeleteOne(_m *Spec) *SpecDeleteOne {
 func (c *SpecClient) DeleteOneID(id int) *SpecDeleteOne {
 	builder := c.Delete().Where(spec.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &SpecDeleteOne{builder}
 }
 
@@ -2968,7 +3134,7 @@ func (c *TaskClient) DeleteOne(_m *Task) *TaskDeleteOne {
 func (c *TaskClient) DeleteOneID(id int) *TaskDeleteOne {
 	builder := c.Delete().Where(enttask.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &TaskDeleteOne{builder}
 }
 
@@ -3101,7 +3267,7 @@ func (c *UserClient) DeleteOne(_m *User) *UserDeleteOne {
 func (c *UserClient) DeleteOneID(id int) *UserDeleteOne {
 	builder := c.Delete().Where(user.ID(id))
 	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
+	builder.mutation.SetOp(OpDeleteOne)
 	return &UserDeleteOne{builder}
 }
 
@@ -3332,12 +3498,13 @@ func (c *UserClient) mutate(ctx context.Context, m *UserMutation) (Value, error)
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
-		Api, Builder, Card, Comment, ExValueScan, FieldType, File, FileType, Goods,
-		Group, GroupInfo, Item, License, Node, PC, Pet, Spec, Task, User []ent.Hook
+		Api, Builder, Card, Comment, Document, ExValueScan, FieldType, File, FileType,
+		Goods, Group, GroupInfo, Item, License, Node, PC, Pet, Spec, Task,
+		User []ent.Hook
 	}
 	inters struct {
-		Api, Builder, Card, Comment, ExValueScan, FieldType, File, FileType, Goods,
-		Group, GroupInfo, Item, License, Node, PC, Pet, Spec, Task,
+		Api, Builder, Card, Comment, Document, ExValueScan, FieldType, File, FileType,
+		Goods, Group, GroupInfo, Item, License, Node, PC, Pet, Spec, Task,
 		User []ent.Interceptor
 	}
 )

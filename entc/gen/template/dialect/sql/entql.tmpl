@@ -53,7 +53,9 @@ var schemaGraph = func() *sqlgraph.Schema {
 			Type: "{{ $n.Name }}",
 			Fields: map[string]*sqlgraph.FieldSpec{
 				{{- range $f := $n.Fields }}
+					{{- if not (or $f.IsBlobNoColumn $f.IsBlobLazy) }}
 					{{ $n.Package }}.{{ $f.Constant }}: {Type: field.{{ $f.Type.ConstName }}, Column: {{ $n.Package }}.{{ $f.Constant }}},
+					{{- end }}
 				{{- end }}
 			},
 		}
@@ -102,7 +104,7 @@ type predicateAdder interface {
 	{{- if not $n.IsView }}
 			// addPredicate implements the predicateAdder interface.
 			func (m *{{ $mutation }}) addPredicate(pred func(s *sql.Selector)) {
-				m.predicates = append(m.predicates, pred)
+				m.Where(pred)
 			}
 
 			// Filter returns an entql.Where implementation to apply filters on the {{ $mutation }} builder.
@@ -140,6 +142,7 @@ type predicateAdder interface {
 	{{- end }}
 
 	{{ range $f := $n.Fields }}
+	{{- if or $f.IsBlobNoColumn $f.IsBlobLazy }}{{ continue }}{{ end }}
 		{{ $type := $f.Type.Type.String }}
 		{{ $iface := print (pascal $type) "P" }}
 		{{- if $f.IsTime }}{{ $iface = "TimeP" }}

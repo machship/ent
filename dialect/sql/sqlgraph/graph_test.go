@@ -1674,6 +1674,7 @@ type user struct {
 	id    int
 	age   int
 	name  string
+	bfID  int
 	edges struct {
 		fk1 int
 		fk2 int
@@ -1684,7 +1685,7 @@ func (*user) values(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch c := columns[i]; c {
-		case "id", "age", "fk1", "fk2":
+		case "id", "age", "best_friend_id", "fk1", "fk2":
 			values[i] = &sql.NullInt64{}
 		case "name":
 			values[i] = &sql.NullString{}
@@ -1707,6 +1708,8 @@ func (u *user) assign(columns []string, values []any) error {
 			u.age = int(values[i].(*sql.NullInt64).Int64)
 		case "name":
 			u.name = values[i].(*sql.NullString).String
+		case "best_friend_id":
+			u.bfID = int(values[i].(*sql.NullInt64).Int64)
 		case "fk1":
 			u.edges.fk1 = int(values[i].(*sql.NullInt64).Int64)
 		case "fk2":
@@ -2024,6 +2027,39 @@ func TestUpdateNode(t *testing.T) {
 			},
 			wantUser: &user{name: "Ariel", age: 30, id: 1},
 		},
+		{
+			name: "schema/edges/clear_bidi_o2o",
+			spec: &UpdateSpec{
+				Node: &NodeSpec{
+					Table:   "users",
+					Schema:  "mydb",
+					Columns: []string{"id", "name", "age", "best_friend_id"},
+					ID:      &FieldSpec{Column: "id", Type: field.TypeInt, Value: 1},
+				},
+				Edges: EdgeMut{
+					Clear: []*EdgeSpec{
+						// Clear O2O bidi edge
+						{Rel: O2O, Schema: "mydb", Table: "users", Bidi: true, Columns: []string{"best_friend_id"}, Target: &EdgeTarget{IDSpec: &FieldSpec{Column: "id"}}},
+					},
+				},
+			},
+			prepare: func(mock sqlmock.Sqlmock) {
+				mock.ExpectBegin()
+				// Clear best friend.
+				mock.ExpectExec(escape("UPDATE `mydb`.`users` SET `best_friend_id` = NULL WHERE `id` = ?")).
+					WithArgs(1).
+					WillReturnResult(sqlmock.NewResult(1, 1))
+				mock.ExpectExec(escape("UPDATE `mydb`.`users` SET `best_friend_id` = NULL WHERE `best_friend_id` = ?")).
+					WithArgs(1).
+					WillReturnResult(sqlmock.NewResult(1, 1))
+				mock.ExpectQuery(escape("SELECT `id`, `name`, `age`, `best_friend_id` FROM `mydb`.`users` WHERE `id` = ?")).
+					WithArgs(1).
+					WillReturnRows(sqlmock.NewRows([]string{"id", "age", "name", "best_friend_id"}).
+						AddRow(1, 31, nil, nil))
+				mock.ExpectCommit()
+			},
+			wantUser: &user{age: 31, id: 1},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2038,6 +2074,37 @@ func TestUpdateNode(t *testing.T) {
 			require.Equal(t, tt.wantUser, usr)
 		})
 	}
+}
+
+func TestUpdateNodeLockedExists(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	mock.ExpectBegin()
+	mock.ExpectExec(escape("UPDATE `users` SET `name` = ? WHERE `id` = ? AND `name` = ?")).
+		WithArgs("b", 1, "a").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(escape("SELECT EXISTS (SELECT * FROM `users` WHERE `id` = ? AND `name` = ? FOR UPDATE)")).
+		WithArgs(1, "a").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).
+			AddRow(false))
+	mock.ExpectRollback()
+	err = UpdateNode(context.Background(), sql.OpenDB(dialect.MySQL, db), &UpdateSpec{
+		Node: &NodeSpec{
+			Table:   "users",
+			Columns: []string{"id", "name"},
+			ID:      &FieldSpec{Column: "id", Type: field.TypeInt, Value: 1},
+		},
+		Predicate: func(s *sql.Selector) {
+			s.Where(sql.EQ("name", "a"))
+		},
+		Fields: FieldMut{
+			Set: []*FieldSpec{
+				{Column: "name", Type: field.TypeString, Value: "b"},
+			},
+		},
+	})
+	require.EqualError(t, err, "record with id 1 not found in table users")
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestExecUpdateNode(t *testing.T) {

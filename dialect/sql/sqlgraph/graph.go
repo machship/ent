@@ -1070,6 +1070,7 @@ func (q *query) selector(ctx context.Context) (*sql.Selector, error) {
 		WithContext(ctx)
 	if q.From != nil {
 		selector = q.From
+		selector.WithContext(ctx)
 	}
 	selector.Select(selector.Columns(q.Node.Columns...)...)
 	if order := q.Order; order != nil {
@@ -1378,6 +1379,12 @@ func (u *updater) scan(rows *sql.Rows) error {
 func (u *updater) ensureExists(ctx context.Context) error {
 	exists := u.builder.Select().From(u.builder.Table(u.Node.Table).Schema(u.Node.Schema)).Where(sql.EQ(u.Node.ID.Column, u.Node.ID.Value))
 	u.Predicate(exists)
+	// In a REPEATABLE READ transaction, MySQL matches the UPDATE against the latest committed
+	// rows, but serves a plain SELECT from the transaction snapshot. A locking read sees what the
+	// UPDATE saw, so a row changed by a concurrent transaction is not taken for an unchanged one.
+	if exists.Dialect() == dialect.MySQL {
+		exists.ForUpdate()
+	}
 	query, args := u.builder.SelectExpr(sql.Exists(exists)).Query()
 	rows := &sql.Rows{}
 	if err := u.tx.Query(ctx, query, args, rows); err != nil {
@@ -1801,6 +1808,7 @@ func (g *graph) clearFKEdges(ctx context.Context, ids []driver.Value, edges []*E
 			pred = matchIDs(edge.Target.IDSpec.Column, edge.Target.Nodes, edge.Columns[0], ids)
 		}
 		query, args := g.builder.Update(edge.Table).
+			Schema(edge.Schema).
 			SetNull(edge.Columns[0]).
 			Where(pred).
 			Query()
