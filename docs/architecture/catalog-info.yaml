@@ -1,0 +1,24 @@
+# ent (machship/ent), MachShip's fork of entgo.io/ent. See README.md in this folder.
+# Nothing here is deployed: Go services pull the fork in with a go.mod replace directive. No secret values.
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: ent
+  description: MachShip fork of the ent Go entity framework (entgo.io/ent) that adds a SQL Server dialect, used by Go services that map MachShip's existing SQL Server tables
+  annotations:
+    github.com/project-slug: machship/ent
+spec:
+  type: library
+  owner: group:uplift
+  lifecycle: proof-of-concept
+  machship:
+    lastReviewed: 2026-11-14
+    supportNote: >-
+      GitHub project-type Proof of Concept, owner-team uplift. Fork of github.com/ent/ent. The MachShip changes
+      (SQL Server dialect, OUTPUT clause, bit comparisons, table hints) live on branch sqlserver, not on the
+      default branch master, which tracks upstream plus Dependabot fixes. Consumers pin pseudo-versions from
+      sqlserver with replace entgo.io/ent => github.com/machship/ent. Importers on default branches: machship-v4
+      and data-gateway (archived machship-go also pinned it). TODO(confirm) whether the plan is to upstream the
+      dialect or keep the fork long term.
+    publishes:
+    - {package: github.com/machship/ent, registry: "Go module proxy (private, fetched with GOPRIVATE=github.com/machship; consumed through a replace of entgo.io/ent)"}
