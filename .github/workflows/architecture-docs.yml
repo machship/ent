@@ -4,4 +4,6 @@ on:
     paths: ["docs/architecture/**"]
 jobs:
   validate:
+    permissions:
+      contents: read
     uses: machship/application-architecture/.github/workflows/validate-architecture-docs.yml@main
